@@ -25,9 +25,9 @@ if (PROJECT_IS_TOP_LEVEL AND NOT TARGET ecewo::ecewo)
 endif()
 
 if(ECEWO_FS_BUILD_SHARED)
-  add_library(ecewo-fs SHARED src/ecewo-fs.c)
+  add_library(ecewo-fs SHARED ecewo-fs.c)
 else()
-  add_library(ecewo-fs STATIC src/ecewo-fs.c)
+  add_library(ecewo-fs STATIC ecewo-fs.c)
 endif()
 
 add_library(ecewo::fs ALIAS ecewo-fs)
@@ -39,7 +39,6 @@ generate_export_header(ecewo-fs
 )
 
 target_include_directories(ecewo-fs PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
@@ -66,7 +65,7 @@ if (PROJECT_IS_TOP_LEVEL AND TARGET ecewo::ecewo)
 
   target_include_directories(ecewo_fs_test
     PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${CMAKE_CURRENT_SOURCE_DIR}/
       ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
 
