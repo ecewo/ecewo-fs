@@ -1,20 +1,21 @@
 #include "ecewo.h"
 #include "ecewo-mock.h"
 #include "ecewo-fs.h"
+#include "uv.h"
 #include "tester.h"
 #include <string.h>
 #include <stdio.h>
 
 static void on_read_complete(const char *error, const char *data, size_t size, void *user_data) {
-  Res *res = (Res *)user_data;
+  ecewo_response_t *res = (ecewo_response_t *)user_data;
 
   if (error) {
-    send_text(res, 404, error);
+    ecewo_send_text(res, 404, error);
     return;
   }
 
-  set_header(res, "Content-Type", "text/plain");
-  reply(res, 200, data, size);
+  ecewo_header_set(res, "Content-Type", "text/plain");
+  ecewo_send(res, 200, data, size);
 
   // No free needed - data is in req->arena (or malloc'd if arena was NULL)
   // In this case, we're using NULL arena, so we should free
@@ -23,61 +24,64 @@ static void on_read_complete(const char *error, const char *data, size_t size, v
 }
 
 static void on_write_complete(const char *error, void *user_data) {
-  Res *res = (Res *)user_data;
+  ecewo_response_t *res = (ecewo_response_t *)user_data;
 
   if (error) {
-    send_text(res, 500, error);
+    ecewo_send_text(res, 500, error);
     return;
   }
 
-  send_text(res, 201, "File written");
+  ecewo_send_text(res, 201, "File written");
 }
 
-static void on_stat_complete(const char *error, const uv_stat_t *stat, void *user_data) {
-  Res *res = (Res *)user_data;
+static void on_stat_complete(const char *error, const fs_stat_t *stat, void *user_data) {
+  ecewo_response_t *res = (ecewo_response_t *)user_data;
 
   if (error) {
-    send_text(res, 404, error);
+    ecewo_send_text(res, 404, error);
     return;
   }
 
-  char *response = arena_sprintf(res->arena, "size:%lld",
-                                 (long long)stat->st_size);
-  send_text(res, 200, response);
+  char *response = ecewo_sprintf(ecewo_res_arena(res), "size:%llu",
+                                 (unsigned long long)fs_stat_size(stat));
+  ecewo_send_text(res, 200, response);
 }
 
-void handler_fs_read(Req *req, Res *res) {
-  const char *filename = get_query(req, "file");
+void handler_fs_read(ecewo_request_t *req, ecewo_response_t *res) {
+  const char *filename = ecewo_query(req, "file");
   if (!filename) {
-    send_text(res, 400, "Missing file parameter");
+    ecewo_send_text(res, 400, "Missing file parameter");
     return;
   }
 
-  char *filepath = arena_sprintf(req->arena, "test_files/%s", filename);
+  char *filepath = ecewo_sprintf(ecewo_req_arena(req), "test_files/%s", filename);
 
-  // Use NULL arena for test - in real apps, use req->arena
+  // Use NULL arena for test - in real apps, use ecewo_req_arena(req)
   fs_read_file(filepath, NULL, on_read_complete, res);
 }
 
-void handler_fs_write(Req *req, Res *res) {
-  const char *filename = get_query(req, "file");
-  if (!filename || !req->body) {
-    send_text(res, 400, "Missing file or body");
+void handler_fs_write(ecewo_request_t *req, ecewo_response_t *res) {
+  const char *filename = ecewo_query(req, "file");
+  const uint8_t *body = ecewo_req_body(req);
+  size_t body_len = ecewo_req_body_len(req);
+
+  if (!filename || !body) {
+    ecewo_send_text(res, 400, "Missing file or body");
     return;
   }
 
-  char *filepath = arena_sprintf(req->arena, "test_files/%s", filename);
-  fs_write_file(filepath, req->body, req->body_len, on_write_complete, res);
+  char *filepath = ecewo_sprintf(ecewo_req_arena(req), "test_files/%s", filename);
+  fs_write_file(filepath, body, body_len, on_write_complete, res);
 }
 
-void handler_fs_stat(Req *req, Res *res) {
-  const char *filename = get_query(req, "file");
+void handler_fs_stat(ecewo_request_t *req, ecewo_response_t *res) {
+  const char *filename = ecewo_query(req, "file");
   if (!filename) {
-    send_text(res, 400, "Missing file parameter");
+    ecewo_send_text(res, 400, "Missing file parameter");
     return;
   }
 
-  char *filepath = arena_sprintf(req->arena, "test_files/%s", filename);
+  char *filepath = ecewo_sprintf(ecewo_req_arena(req), "test_files/%s", filename);
   fs_stat(filepath, on_stat_complete, res);
 }
 
@@ -208,10 +212,10 @@ int test_fs_missing_parameter(void) {
   RETURN_OK();
 }
 
-void setup_all_routes(void) {
-  get("/fs/read", handler_fs_read);
-  post("/fs/write", handler_fs_write);
-  get("/fs/stat", handler_fs_stat);
+void setup_all_routes(ecewo_app_t *app) {
+  ECEWO_GET(app, "/fs/read", handler_fs_read);
+  ECEWO_POST(app, "/fs/write", handler_fs_write);
+  ECEWO_GET(app, "/fs/stat", handler_fs_stat);
 }
 
 int main(void) {

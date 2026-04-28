@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 3.14)
-project(ecewo-fs VERSION 0.1.0 LANGUAGES C)
+project(ecewo-fs VERSION 0.2.0 LANGUAGES C)
 
-add_library(ecewo-fs
-  src/ecewo-fs.c
-)
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
 
-add_library(ecewo::fs ALIAS ecewo-fs)
+if(PROJECT_IS_TOP_LEVEL)
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
 
-target_include_directories(ecewo-fs PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-)
+option(ECEWO_FS_BUILD_SHARED "Build ecewo-fs as a shared library" OFF)
 
 if (PROJECT_IS_TOP_LEVEL AND NOT TARGET ecewo::ecewo)
   include(FetchContent)
@@ -17,15 +17,47 @@ if (PROJECT_IS_TOP_LEVEL AND NOT TARGET ecewo::ecewo)
   FetchContent_Declare(
     ecewo
     GIT_REPOSITORY https://github.com/savashn/ecewo.git
-    GIT_TAG        v3.0.1
-    GIT_SHALLOW    TRUE
+    GIT_TAG v4
+    GIT_SHALLOW TRUE
   )
 
   FetchContent_MakeAvailable(ecewo)
 endif()
 
+if(ECEWO_FS_BUILD_SHARED)
+  add_library(ecewo-fs SHARED src/ecewo-fs.c)
+else()
+  add_library(ecewo-fs STATIC src/ecewo-fs.c)
+endif()
+
+add_library(ecewo::fs ALIAS ecewo-fs)
+
+include(GenerateExportHeader)
+generate_export_header(ecewo-fs
+  BASE_NAME ECEWO_FS
+  EXPORT_FILE_NAME "${CMAKE_CURRENT_BINARY_DIR}/include/ecewo-fs-export.h"
+)
+
+target_include_directories(ecewo-fs PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+set_target_properties(ecewo-fs PROPERTIES
+  OUTPUT_NAME ecewo-fs
+  VERSION ${PROJECT_VERSION}
+  SOVERSION ${PROJECT_VERSION_MAJOR}
+  EXPORT_NAME fs
+  C_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON
+  POSITION_INDEPENDENT_CODE ON
+)
+
+target_link_libraries(ecewo-fs PUBLIC ecewo::ecewo)
+
 if (PROJECT_IS_TOP_LEVEL AND TARGET ecewo::ecewo)
-  ecewo_plugin(mock)
+  ecewo_add(mock@dev)
   enable_testing()
 
   add_executable(ecewo_fs_test
@@ -61,5 +93,3 @@ if (PROJECT_IS_TOP_LEVEL AND TARGET ecewo::ecewo)
     COMMAND ecewo_fs_test
   )
 endif()
-
-target_link_libraries(ecewo-fs PUBLIC ecewo::ecewo)

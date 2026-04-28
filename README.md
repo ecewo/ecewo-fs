@@ -29,6 +29,9 @@ ecewo provides asynchronous file I/O operations using libuv's native API. All op
 5. [Memory Management](#memory-management)
 6. [Error Handling](#error-handling)
 7. [Common Error Codes](#common-error-codes)
+8. [Limits and Configuration](#limits-and-configuration)
+9. [Statistics and Monitoring](#statistics-and-monitoring)
+10. [Shutdown and Cleanup](#shutdown-and-cleanup)
 
 > [!IMPORTANT]
 >
@@ -47,29 +50,45 @@ target_link_libraries(app PRIVATE
 )
 ```
 
+### Building as a shared library (FFI consumers)
+
+ecewo-fs is FFI-friendly: only the documented `fs_*` functions are exported,
+the public header has no dependency on libuv types, and all metadata
+returned to callbacks uses fixed-width integer types. To produce a `.so` /
+`.dylib` / `.dll` for use from another language, configure with:
+
+```sh
+cmake -B build -DECEWO_FS_BUILD_SHARED=ON
+cmake --build build
+```
+
 Initialize the file system module in your application:
 
 ```c
 #include "ecewo.h"
 #include "ecewo-fs.h"
 
+static void on_exit(void *user_data) {
+    (void)user_data;
+    fs_cleanup();
+}
+
 int main(void) {
-    server_init();
-    
+    ecewo_app_t *app = ecewo_create();
+
     // Initialize file system module
     if (fs_init() != 0) {
         fprintf(stderr, "Failed to initialize fs module\n");
         return 1;
     }
-    
+
     // Your routes...
-    get("/file", read_handler);
-    
+    ECEWO_GET(app, "/file", read_handler);
+
     // Register cleanup handler
-    server_atexit(fs_cleanup);
-    
-    server_listen(3000);
-    server_run();
+    ecewo_atexit(app, on_exit, NULL);
+
+    ecewo_listen(app, 3000);
     return 0;
 }
 ```
@@ -83,23 +102,23 @@ int main(void) {
 #include "ecewo-fs.h"
 
 static void on_file_read(const char *error, const char *data, size_t size, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    // data is allocated in req->arena - no need to free
+
+    // data is allocated in the request arena - no need to free
     printf("Read %zu bytes\n", size);
-    set_header(res, "Content-Type", "text/plain");
-    reply(res, OK, data, size);
+    ecewo_header_set(res, "Content-Type", "text/plain");
+    ecewo_send(res, ECEWO_OK, data, size);
 }
 
-void read_handler(Req *req, Res *res) {
-    // Read the public/data.txt
-    // Pass req->arena for automatic memory management
-    fs_read_file("public/data.txt", req->arena, on_file_read, res);
+void read_handler(ecewo_request_t *req, ecewo_response_t *res) {
+    // Read public/data.txt
+    // Pass the request arena for automatic memory management
+    fs_read_file("public/data.txt", ecewo_req_arena(req), on_file_read, res);
 }
 ```
 
@@ -107,19 +126,21 @@ void read_handler(Req *req, Res *res) {
 
 ```c
 static void on_file_written(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    send_text(res, 200, "Saved!");
+
+    ecewo_send_text(res, 200, "Saved!");
 }
 
-void save_handler(Req *req, Res *res) {
-    const char *content = req->body;
-    fs_write_file("public/output.txt", content, strlen(content), on_file_written, res);
+void save_handler(ecewo_request_t *req, ecewo_response_t *res) {
+    const uint8_t *body = ecewo_req_body(req);
+    size_t body_len = ecewo_req_body_len(req);
+
+    fs_write_file("public/output.txt", body, body_len, on_file_written, res);
 }
 ```
 
@@ -147,9 +168,9 @@ All file paths are relative to the directory where the server executable is run,
 
 ```c
 // Relative to current working directory
-fs_read_file("data.txt", req->arena, callback, user_data);           // ./data.txt
-fs_read_file("logs/app.log", req->arena, callback, user_data);       // ./logs/app.log
-fs_read_file("./config/settings.json", req->arena, callback, user_data); // ./config/settings.json
+fs_read_file("data.txt", ecewo_req_arena(req), callback, user_data);           // ./data.txt
+fs_read_file("logs/app.log", ecewo_req_arena(req), callback, user_data);       // ./logs/app.log
+fs_read_file("./config/settings.json", ecewo_req_arena(req), callback, user_data); // ./config/settings.json
 ```
 
 ### Project Structure Example
@@ -217,7 +238,7 @@ cd /home/user/myproject
 ```c
 // All relative to /home/user/myproject/
 
-fs_read_file("data/users.json", req->arena, callback, user_data);
+fs_read_file("data/users.json", ecewo_req_arena(req), callback, user_data);
 // -> /home/user/myproject/data/users.json
 
 fs_write_file("logs/app.log", data, len, callback, user_data);
@@ -239,7 +260,7 @@ cd /home/user/myproject/build
 ```c
 // All relative to /home/user/myproject/build/
 
-fs_read_file("../data/users.json", req->arena, callback, user_data);
+fs_read_file("../data/users.json", ecewo_req_arena(req), callback, user_data);
 // -> /home/user/myproject/data/users.json
 
 fs_write_file("../logs/app.log", data, len, callback, user_data);
@@ -256,15 +277,15 @@ fs_write_file("../uploads/photo.jpg", img, size, callback, user_data);
 Read entire file into memory asynchronously.
 
 ```c
-int fs_read_file(const char *path, Arena *arena, fs_read_callback_t callback, void *user_data);
+int fs_read_file(const char *path, ecewo_arena_t *arena, fs_read_callback_t callback, void *user_data);
 ```
 
 **Parameters:**
 
 - `path`: File path to read
-- `arena`: Arena allocator for file data (pass `req->arena` or `NULL` for malloc)
+- `arena`: Arena allocator for file data (pass `ecewo_req_arena(req)` or `NULL` for malloc)
 - `callback`: Function called when operation completes
-- `user_data`: User context pointer (usually `Req*` or `Res*`)
+- `user_data`: User context pointer (usually `ecewo_request_t *` or `ecewo_response_t *`)
 
 **Returns:**
 - `0` if operation was queued successfully
@@ -297,21 +318,21 @@ typedef void (*fs_read_callback_t)(
 
 ```c
 static void on_read(const char *error, const char *data, size_t size, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        char *msg = arena_sprintf(res->arena, "Error: %s", error);
-        send_text(res, 500, msg);
+        char *msg = ecewo_sprintf(ecewo_res_arena(res), "Error: %s", error);
+        ecewo_send_text(res, 500, msg);
         return;
     }
-    
+
     printf("Read %zu bytes\n", size);
-    send_text(res, 200, data);
-    // No free() needed - data is in req->arena
+    ecewo_send_text(res, 200, data);
+    // No free() needed - data is in the request arena
 }
 
-void handler(Req *req, Res *res) {
-    fs_read_file("config.json", req->arena, on_read, res);
+void handler(ecewo_request_t *req, ecewo_response_t *res) {
+    fs_read_file("config.json", ecewo_req_arena(req), on_read, res);
 }
 ```
 
@@ -323,7 +344,7 @@ static void on_read(const char *error, const char *data, size_t size, void *user
         printf("Error: %s\n", error);
         return;
     }
-    
+
     printf("Read: %.*s\n", (int)size, data);
     free((void *)data);  // MUST FREE when using NULL arena
 }
@@ -369,17 +390,17 @@ typedef void (*fs_write_callback_t)(const char *error, void *user_data);
 
 ```c
 static void on_saved(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    send_json(res, 200, "{\"status\":\"saved\"}");
+
+    ecewo_send_json(res, 200, "{\"status\":\"saved\"}");
 }
 
-void save_handler(Req *req, Res *res) {
+void save_handler(ecewo_request_t *req, ecewo_response_t *res) {
     const char *json = "{\"status\":\"active\"}";
     fs_write_file("status.json", json, strlen(json), on_saved, res);
 }
@@ -406,18 +427,22 @@ Same as `fs_write_file()`
 
 ```c
 static void on_logged(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    send_text(res, 200, "Logged");
+
+    ecewo_send_text(res, 200, "Logged");
 }
 
-void log_handler(Req *req, Res *res) {
-    char *log = arena_sprintf(req->arena, "[%ld] %s\n", time(NULL), req->body);
+void log_handler(ecewo_request_t *req, ecewo_response_t *res) {
+    const uint8_t *body = ecewo_req_body(req);
+    char *log = ecewo_sprintf(ecewo_req_arena(req), "[%ld] %.*s\n",
+                              time(NULL),
+                              (int)ecewo_req_body_len(req),
+                              (const char *)body);
     fs_append_file("app.log", log, strlen(log), on_logged, res);
 }
 ```
@@ -445,7 +470,7 @@ int fs_stat(const char *path, fs_stat_callback_t callback, void *user_data);
 ```c
 typedef void (*fs_stat_callback_t)(
     const char *error,
-    const uv_stat_t *stat,
+    const fs_stat_t *stat,
     void *user_data
 );
 ```
@@ -456,39 +481,57 @@ typedef void (*fs_stat_callback_t)(
 - `stat`: File statistics on success (valid only during callback)
 - `user_data`: The context pointer you passed
 
-**Available stat fields:**
+`fs_stat_t` is **opaque**. The struct layout is not exposed in the header. Access all
+fields through the provided accessor functions, which return FFI-safe fixed-width integers:
 
-- `st_size`: File size in bytes
-- `st_mtim`: Last modification time
-- `st_atim`: Last access time
-- `st_ctim`: Creation time
-- `st_mode`: File permissions
+| Accessor                    | Return type | Description                              |
+|-----------------------------|-------------|------------------------------------------|
+| `fs_stat_size(stat)`        | `uint64_t`  | File size in bytes                       |
+| `fs_stat_mode(stat)`        | `uint64_t`  | File mode (permissions and type bits)    |
+| `fs_stat_nlink(stat)`       | `uint64_t`  | Number of hard links                     |
+| `fs_stat_uid(stat)`         | `uint64_t`  | Owner user ID                            |
+| `fs_stat_gid(stat)`         | `uint64_t`  | Owner group ID                           |
+| `fs_stat_ino(stat)`         | `uint64_t`  | Inode number                             |
+| `fs_stat_dev(stat)`         | `uint64_t`  | Device ID                                |
+| `fs_stat_rdev(stat)`        | `uint64_t`  | Device ID for special files              |
+| `fs_stat_blksize(stat)`     | `uint64_t`  | Block size for I/O                       |
+| `fs_stat_blocks(stat)`      | `uint64_t`  | 512-byte blocks allocated                |
+| `fs_stat_flags(stat)`       | `uint64_t`  | Platform-specific file flags             |
+| `fs_stat_gen(stat)`         | `uint64_t`  | File generation number                   |
+| `fs_stat_atime_sec(stat)`   | `int64_t`   | Last access time, seconds                |
+| `fs_stat_atime_nsec(stat)`  | `int64_t`   | Last access time, nanoseconds            |
+| `fs_stat_mtime_sec(stat)`   | `int64_t`   | Last modification time, seconds          |
+| `fs_stat_mtime_nsec(stat)`  | `int64_t`   | Last modification time, nanoseconds      |
+| `fs_stat_ctime_sec(stat)`   | `int64_t`   | Last status change time, seconds         |
+| `fs_stat_ctime_nsec(stat)`  | `int64_t`   | Last status change time, nanoseconds     |
+| `fs_stat_birthtime_sec(stat)`  | `int64_t` | Creation time, seconds (0 if unsupported)|
+| `fs_stat_birthtime_nsec(stat)` | `int64_t` | Creation time, nanoseconds               |
 
 **Example:**
 
 ```c
-static void on_stat(const char *error, const uv_stat_t *stat, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+static void on_stat(const char *error, const fs_stat_t *stat, void *user_data) {
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 404, "File not found");
+        ecewo_send_text(res, 404, "File not found");
         return;
     }
-    
-    char *response = arena_sprintf(res->arena,
+
+    char *response = ecewo_sprintf(ecewo_res_arena(res),
         "{"
-        "\"size\":%lld,"
+        "\"size\":%llu,"
         "\"modified\":%lld"
         "}",
-        (long long)stat->st_size,
-        (long long)stat->st_mtim.tv_sec
+        (unsigned long long)fs_stat_size(stat),
+        (long long)fs_stat_mtime_sec(stat)
     );
-    
-    send_json(res, 200, response);
+
+    ecewo_send_json(res, 200, response);
 }
 
-void info_handler(Req *req, Res *res) {
-    const char *path = get_query(req, "path");
+void info_handler(ecewo_request_t *req, ecewo_response_t *res) {
+    const char *path = ecewo_query(req, "path");
     fs_stat(path, on_stat, res);
 }
 ```
@@ -515,19 +558,19 @@ int fs_unlink(const char *path, fs_write_callback_t callback, void *user_data);
 
 ```c
 static void on_deleted(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    send_text(res, 200, "Deleted");
+
+    ecewo_send_text(res, 200, "Deleted");
 }
 
-void delete_handler(Req *req, Res *res) {
-    const char *file = get_query(req, "file");
-    
+void delete_handler(ecewo_request_t *req, ecewo_response_t *res) {
+    const char *file = ecewo_query(req, "file");
+
     fs_unlink(file, on_deleted, res);
 }
 ```
@@ -556,17 +599,17 @@ int fs_rename(const char *old_path, const char *new_path,
 
 ```c
 static void on_renamed(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    send_text(res, 200, "Renamed");
+
+    ecewo_send_text(res, 200, "Renamed");
 }
 
-void rename_handler(Req *req, Res *res) {
+void rename_handler(ecewo_request_t *req, ecewo_response_t *res) {
     fs_rename("old.txt", "new.txt", on_renamed, res);
 }
 ```
@@ -593,17 +636,17 @@ int fs_mkdir(const char *path, fs_write_callback_t callback, void *user_data);
 
 ```c
 static void on_dir_created(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    send_text(res, 200, "Created");
+
+    ecewo_send_text(res, 200, "Created");
 }
 
-void create_dir_handler(Req *req, Res *res) {
+void create_dir_handler(ecewo_request_t *req, ecewo_response_t *res) {
     fs_mkdir("uploads", on_dir_created, res);
 }
 ```
@@ -630,17 +673,17 @@ int fs_rmdir(const char *path, fs_write_callback_t callback, void *user_data);
 
 ```c
 static void on_dir_removed(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    send_text(res, 200, "Removed");
+
+    ecewo_send_text(res, 200, "Removed");
 }
 
-void remove_dir_handler(Req *req, Res *res) {
+void remove_dir_handler(ecewo_request_t *req, ecewo_response_t *res) {
     fs_rmdir("temp", on_dir_removed, res);
 }
 ```
@@ -652,35 +695,35 @@ void remove_dir_handler(Req *req, Res *res) {
 ```c
 // Step 2: Write processed content
 static void on_written(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
 
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
 
-    send_text(res, 200, "Processed and saved");
+    ecewo_send_text(res, 200, "Processed and saved");
 }
 
 // Step 1: Read and process
 static void on_read(const char *error, const char *data, size_t size, void *user_data) {
-    Res *res = (Res *)user_data;
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
 
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
 
     // Process file content (data is in arena, no need to free)
-    char *processed = arena_sprintf(res->arena, "PROCESSED: %s", data);
+    char *processed = ecewo_sprintf(ecewo_res_arena(res), "PROCESSED: %s", data);
 
     // Write processed content
     fs_write_file("output.txt", processed, strlen(processed), on_written, res);
 }
 
-void process_handler(Req *req, Res *res) {
+void process_handler(ecewo_request_t *req, ecewo_response_t *res) {
     // Read, process, and write
-    fs_read_file("public/input.txt", req->arena, on_read, res);
+    fs_read_file("public/input.txt", ecewo_req_arena(req), on_read, res);
 }
 ```
 
@@ -692,7 +735,7 @@ void process_handler(Req *req, Res *res) {
 
 typedef struct
 {
-    Res *res;
+    ecewo_response_t *res;
     int completed;
     int total;
     char *file1_data;
@@ -702,7 +745,7 @@ typedef struct
 
 static void send_combined_response(ParallelContext *ctx) {
     if (ctx->completed == ctx->total) {
-        char *response = arena_sprintf(ctx->res->arena,
+        char *response = ecewo_sprintf(ecewo_res_arena(ctx->res),
             "{"
             "\"file1\":\"%s\","
             "\"file2\":\"%s\","
@@ -713,7 +756,7 @@ static void send_combined_response(ParallelContext *ctx) {
             ctx->file3_data ? ctx->file3_data : "error"
         );
 
-        send_json(ctx->res, 200, response);
+        ecewo_send_json(ctx->res, 200, response);
     }
 }
 
@@ -751,8 +794,9 @@ static void on_file3(const char *error, const char *data, size_t size, void *use
     send_combined_response(ctx);
 }
 
-void parallel_handler(Req *req, Res *res) {
-    ParallelContext *ctx = arena_alloc(req->arena, sizeof(ParallelContext));
+void parallel_handler(ecewo_request_t *req, ecewo_response_t *res) {
+    ecewo_arena_t *arena = ecewo_req_arena(req);
+    ParallelContext *ctx = ecewo_alloc(arena, sizeof(ParallelContext));
     ctx->res = res;
     ctx->completed = 0;
     ctx->total = 3;
@@ -760,10 +804,10 @@ void parallel_handler(Req *req, Res *res) {
     ctx->file2_data = NULL;
     ctx->file3_data = NULL;
 
-    // Start 3 parallel reads - all use req->arena for memory
-    fs_read_file("public/file1.txt", req->arena, on_file1, ctx);
-    fs_read_file("public/file2.txt", req->arena, on_file2, ctx);
-    fs_read_file("public/file3.txt", req->arena, on_file3, ctx);
+    // Start 3 parallel reads - all use the request arena for memory
+    fs_read_file("public/file1.txt", arena, on_file1, ctx);
+    fs_read_file("public/file2.txt", arena, on_file2, ctx);
+    fs_read_file("public/file3.txt", arena, on_file3, ctx);
 }
 ```
 
@@ -771,29 +815,29 @@ void parallel_handler(Req *req, Res *res) {
 
 ```c
 static void on_uploaded(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
         return;
     }
-    
-    send_text(res, 200, "Uploaded");
+
+    ecewo_send_text(res, 200, "Uploaded");
 }
 
-void upload_handler(Req *req, Res *res) {
+void upload_handler(ecewo_request_t *req, ecewo_response_t *res) {
     // Get filename from request params
-    const char *filename = get_param(req, "filename");
+    const char *filename = ecewo_param(req, "filename");
     if (!filename) {
-        send_text(res, 400, "Missing filename");
+        ecewo_send_text(res, 400, "Missing filename");
         return;
     }
-    
+
     // Build safe path
-    char *filepath = arena_sprintf(req->arena, "uploads/%s", filename);
-    
-    // Save uploaded file (data is copied internally, req->body remains valid)
-    fs_write_file(filepath, req->body, req->body_len, on_uploaded, res);
+    char *filepath = ecewo_sprintf(ecewo_req_arena(req), "uploads/%s", filename);
+
+    // Save uploaded file (data is copied internally, request body remains valid)
+    fs_write_file(filepath, ecewo_req_body(req), ecewo_req_body_len(req), on_uploaded, res);
 }
 ```
 
@@ -805,17 +849,17 @@ ecewo-fs provides flexible memory management through arena allocators:
 
 **With arena (recommended):**
 ```c
-void handler(Req *req, Res *res) {
-    // Pass req->arena - file data will be automatically freed
-    fs_read_file("data.txt", req->arena, on_read, res);
+void handler(ecewo_request_t *req, ecewo_response_t *res) {
+    // Pass the request arena - file data will be automatically freed
+    fs_read_file("data.txt", ecewo_req_arena(req), on_read, res);
 }
 
 static void on_read(const char *error, const char *data, size_t size, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (!error) {
         // Use data directly - no free() needed
-        send_text(res, 200, data);
+        ecewo_send_text(res, 200, data);
     }
     // data is automatically freed when request completes
 }
@@ -841,12 +885,12 @@ static void on_read(const char *error, const char *data, size_t size, void *user
 Write operations always manage memory internally:
 
 ```c
-void handler(Req *req, Res *res) {
+void handler(ecewo_request_t *req, ecewo_response_t *res) {
     const char *data = "Hello, World!";
-    
+
     // Data is copied internally - safe to free immediately after call
     fs_write_file("out.txt", data, strlen(data), on_write, res);
-    
+
     // data can be freed or go out of scope here - it's already copied
 }
 ```
@@ -857,17 +901,17 @@ Error messages in callbacks are **valid only during the callback**:
 
 ```c
 static void on_read(const char *error, const char *data, size_t size, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
         // WRONG: Saving pointer for later use
         // char *saved = error;  // Dangling pointer after callback
-        
+
         // RIGHT: Copy if you need it later
-        char *copy = arena_sprintf(res->arena, "Error: %s", error);
-        
+        char *copy = ecewo_sprintf(ecewo_res_arena(res), "Error: %s", error);
+
         // Or use immediately
-        send_text(res, 500, error);
+        ecewo_send_text(res, 500, error);
     }
 }
 ```
@@ -885,30 +929,30 @@ All callbacks follow the error-first pattern:
 
 ```c
 static void on_operation(const char *error, void *user_data) {
-    Res *res = (Res *)user_data;
-    
+    ecewo_response_t *res = (ecewo_response_t *)user_data;
+
     if (error) {
         // Error occurred
         // error contains: "ENOENT: no such file or directory"
-        
+
         if (strstr(error, "ENOENT")) {
-            send_text(res, 404, "File not found");
+            ecewo_send_text(res, 404, "File not found");
         }
         else if (strstr(error, "EACCES")) {
-            send_text(res, 403, "Permission denied");
+            ecewo_send_text(res, 403, "Permission denied");
         }
         else if (strstr(error, "EISDIR")) {
-            send_text(res, 400, "Path is a directory");
+            ecewo_send_text(res, 400, "Path is a directory");
         }
         else {
-            send_text(res, 500, error);
+            ecewo_send_text(res, 500, error);
         }
-        
+
         return;
     }
-    
+
     // Success
-    send_text(res, 200, "OK");
+    ecewo_send_text(res, 200, "OK");
 }
 ```
 
@@ -945,16 +989,22 @@ target_compile_definitions(app PRIVATE
 
 ## Statistics and Monitoring
 
-Get file system operation statistics:
+All statistics are read through individual accessor functions (no struct to allocate):
+
+| Accessor                          | Return type | Description                    |
+|-----------------------------------|-------------|--------------------------------|
+| `fs_stats_active_operations()`    | `int`       | Currently running operations   |
+| `fs_stats_peak_operations()`      | `int`       | Peak concurrent operations     |
+| `fs_stats_queued_operations()`    | `int`       | Operations waiting for a slot  |
+| `fs_stats_total_reads()`          | `uint64_t`  | Total read operations          |
+| `fs_stats_total_writes()`         | `uint64_t`  | Total write operations         |
+| `fs_stats_total_bytes_read()`     | `uint64_t`  | Total bytes read               |
+| `fs_stats_total_bytes_written()`  | `uint64_t`  | Total bytes written            |
+| `fs_stats_failed_operations()`    | `int`       | Operations that failed         |
 
 ```c
-#include "ecewo-fs.h"
-
-void stats_handler(Req *req, Res *res) {
-    fs_stats_t stats;
-    fs_get_stats(&stats);
-    
-    char *json = arena_sprintf(req->arena,
+void stats_handler(ecewo_request_t *req, ecewo_response_t *res) {
+    char *json = ecewo_sprintf(ecewo_req_arena(req),
         "{"
         "\"active_operations\":%d,"
         "\"peak_operations\":%d,"
@@ -964,16 +1014,16 @@ void stats_handler(Req *req, Res *res) {
         "\"total_bytes_written\":%llu,"
         "\"failed_operations\":%d"
         "}",
-        stats.active_operations,
-        stats.peak_operations,
-        (unsigned long long)stats.total_reads,
-        (unsigned long long)stats.total_writes,
-        (unsigned long long)stats.total_bytes_read,
-        (unsigned long long)stats.total_bytes_written,
-        stats.failed_operations
+        fs_stats_active_operations(),
+        fs_stats_peak_operations(),
+        (unsigned long long)fs_stats_total_reads(),
+        (unsigned long long)fs_stats_total_writes(),
+        (unsigned long long)fs_stats_total_bytes_read(),
+        (unsigned long long)fs_stats_total_bytes_written(),
+        fs_stats_failed_operations()
     );
-    
-    send_json(res, 200, json);
+
+    ecewo_send_json(res, 200, json);
 }
 ```
 
@@ -988,40 +1038,43 @@ Check if system can accept more operations:
 ```c
 if (fs_can_accept_operation()) {
     // Queue operation
-    fs_read_file("file.txt", req->arena, callback, res);
+    fs_read_file("file.txt", ecewo_req_arena(req), callback, res);
 } else {
     // System at capacity
-    send_text(res, 503, "Service temporarily unavailable");
+    ecewo_send_text(res, 503, "Service temporarily unavailable");
 }
 ```
 
 ## Shutdown and Cleanup
 
-Always register `fs_cleanup()` with `server_atexit()` to ensure proper cleanup:
+Always register `fs_cleanup()` with `ecewo_atexit()` to ensure proper cleanup:
 
 ```c
+static void on_exit(void *user_data) {
+    (void)user_data;
+    fs_cleanup();
+}
+
 int main(void) {
-    server_init();
+    ecewo_app_t *app = ecewo_create();
     fs_init();
-    
+
     // Your routes...
-    get("/file", read_handler);
-    
+    ECEWO_GET(app, "/file", read_handler);
+
     // Register cleanup - called automatically on shutdown
-    server_atexit(fs_cleanup);
-    
-    server_listen(3000);
-    server_run();
+    ecewo_atexit(app, on_exit, NULL);
+
+    ecewo_listen(app, 3000);
     return 0;
 }
 ```
 
 `fs_cleanup()` will:
-- Wait up to 1 second for pending operations to complete
-- Print a warning if operations are still active
-- Clean up internal resources
+- Print a warning if operations are still active at shutdown time
+- Mark the module as uninitialized
 
 The cleanup is automatically triggered when:
 - Server receives a shutdown signal (SIGINT, SIGTERM)
-- `server_run()` returns normally
+- `ecewo_run()` / `ecewo_listen()` returns normally
 - Application exits
