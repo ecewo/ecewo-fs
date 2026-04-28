@@ -1,4 +1,5 @@
 #include "ecewo-fs.h"
+#include "ecewo.h"
 #include "uv.h"
 #include <stdio.h>
 #include <stdlib.h>

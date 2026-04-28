@@ -39,6 +39,7 @@ generate_export_header(ecewo-fs
 )
 
 target_include_directories(ecewo-fs PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )

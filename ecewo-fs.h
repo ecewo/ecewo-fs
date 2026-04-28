@@ -5,11 +5,13 @@
 extern "C" {
 #endif
 
-#include "ecewo.h"
 #include "ecewo-fs-export.h"
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
+
+// Opaque arena type from ecewo. Pass ecewo_req_arena(req) inside request handlers,
+// or NULL to use malloc (caller must then free the data returned in the callback).
+typedef struct ecewo_arena_s ecewo_arena_t;
 
 // If arena provided: data is allocated in arena (auto-freed with arena)
 // If arena is NULL: data is malloc'd (caller MUST free)
@@ -52,7 +54,6 @@ typedef void (*fs_stat_callback_t)(
 ECEWO_FS_EXPORT int fs_init(void);
 
 // Should be called at application shutdown
-// Waits for pending operations to complete (with timeout)
 ECEWO_FS_EXPORT void fs_cleanup(void);
 
 // ---------------------------------------------------------------------------
@@ -159,7 +160,7 @@ ECEWO_FS_EXPORT int      fs_stats_failed_operations(void);
 // Reset all statistics counters
 ECEWO_FS_EXPORT void fs_reset_stats(void);
 
-// Returns: 0 if can accept, -1 if at limit
+// Returns: 1 if can accept, 0 if at limit, -1 if not initialized
 ECEWO_FS_EXPORT int fs_can_accept_operation(void);
 
 #ifdef __cplusplus
