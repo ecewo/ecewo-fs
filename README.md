@@ -42,7 +42,7 @@ ecewo provides asynchronous file I/O operations using libuv's native API. All op
 Add to your `CMakeLists.txt`:
 
 ```sh
-ecewo_plugin(fs)
+ecewo_add(fs@v0.2.0)
 
 target_link_libraries(app PRIVATE
     ecewo::ecewo
