@@ -84,6 +84,25 @@ ECEWO_FS_EXPORT int fs_append_file(
     fs_write_callback_t callback,
     void *user_data);
 
+/** Write a file that only this process may reuse or read: fails if the path
+ *  already exists or is a symlink, and creates it with mode 0600.
+ *  Use for temporary/spool files in shared directories. */
+ECEWO_FS_EXPORT int fs_write_file_private(
+    const char *path,
+    const void *data,
+    size_t size,
+    fs_write_callback_t callback,
+    void *user_data);
+
+/** Append to a file created by fs_write_file_private(). Refuses to follow a
+ *  symlink; creates with mode 0600 if missing. */
+ECEWO_FS_EXPORT int fs_append_file_private(
+    const char *path,
+    const void *data,
+    size_t size,
+    fs_write_callback_t callback,
+    void *user_data);
+
 // Returns: 0 if operation queued, -1 if rejected
 ECEWO_FS_EXPORT int fs_stat(
     const char *path,

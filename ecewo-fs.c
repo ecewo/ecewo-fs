@@ -444,7 +444,8 @@ static void write_open_cb(uv_fs_t *uv_req) {
 }
 
 static int fs_write_internal(const char *path, const void *data, size_t size,
-                              fs_write_callback_t callback, void *user_data, int flags) {
+                             fs_write_callback_t callback, void *user_data,
+                             int flags, int mode) {
   if (!path || !data || !callback) {
     fprintf(stderr, "[ecewo-fs] fs_write: Invalid arguments\n");
     return -1;
@@ -492,7 +493,7 @@ static int fs_write_internal(const char *path, const void *data, size_t size,
   fs_begin_operation();
 
   int result = uv_fs_open((uv_loop_t *)ecewo_get_loop(), &req->fs_req, req->path,
-                          flags, 0644, write_open_cb);
+                          flags, mode, write_open_cb);
 
   if (result < 0) {
     req->error_msg = make_error_msg(work, result);
@@ -509,13 +510,37 @@ static int fs_write_internal(const char *path, const void *data, size_t size,
 int fs_write_file(const char *path, const void *data, size_t size,
                   fs_write_callback_t callback, void *user_data) {
   return fs_write_internal(path, data, size, callback, user_data,
-                           UV_FS_O_WRONLY | UV_FS_O_CREAT | UV_FS_O_TRUNC);
+                           UV_FS_O_WRONLY | UV_FS_O_CREAT | UV_FS_O_TRUNC,
+                           0644);
 }
 
 int fs_append_file(const char *path, const void *data, size_t size,
                    fs_write_callback_t callback, void *user_data) {
   return fs_write_internal(path, data, size, callback, user_data,
-                           UV_FS_O_WRONLY | UV_FS_O_CREAT | UV_FS_O_APPEND);
+                           UV_FS_O_WRONLY | UV_FS_O_CREAT | UV_FS_O_APPEND,
+                           0644);
+}
+
+/* O_EXCL refuses to reuse an existing path and O_NOFOLLOW refuses to follow a
+ * symlink, so a pre-planted name in a shared directory (/tmp) fails the open
+ * instead of letting the caller truncate whatever it points at. Mode 0600
+ * keeps the contents from other users on the machine. */
+int fs_write_file_private(const char *path, const void *data, size_t size,
+                          fs_write_callback_t callback, void *user_data) {
+  return fs_write_internal(path, data, size, callback, user_data,
+                           UV_FS_O_WRONLY | UV_FS_O_CREAT | UV_FS_O_EXCL
+                               | UV_FS_O_NOFOLLOW,
+                           0600);
+}
+
+/* Same protections for the append path, which cannot use O_EXCL because it
+ * reopens a file it already created. */
+int fs_append_file_private(const char *path, const void *data, size_t size,
+                           fs_write_callback_t callback, void *user_data) {
+  return fs_write_internal(path, data, size, callback, user_data,
+                           UV_FS_O_WRONLY | UV_FS_O_CREAT | UV_FS_O_APPEND
+                               | UV_FS_O_NOFOLLOW,
+                           0600);
 }
 
 // ---------------------------------------------------------------------------
